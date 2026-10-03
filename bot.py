@@ -2,6 +2,8 @@ import os
 import sqlite3
 import random
 import time
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
@@ -1211,11 +1213,28 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN .env ichida topilmadi")
 
     init_db()
+    start_health_server()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
