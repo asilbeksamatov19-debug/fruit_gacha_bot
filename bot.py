@@ -42,6 +42,16 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_users (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            tickets INTEGER DEFAULT 0,
+            last_gacha INTEGER DEFAULT 0,
+            PRIMARY KEY(chat_id, user_id)
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS required_chats (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id TEXT UNIQUE,
@@ -97,6 +107,26 @@ def save_user(user):
     con.close()
 
 
+async def register_group_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return
+
+    user = update.effective_user
+    if not user or user.is_bot:
+        return
+
+    save_user(user)
+
+    con = db()
+    con.execute("""
+        INSERT INTO group_users (chat_id, user_id, tickets)
+        VALUES (?, ?, 0)
+        ON CONFLICT(chat_id, user_id) DO NOTHING
+    """, (update.effective_chat.id, user.id))
+    con.commit()
+    con.close()
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user)
 
@@ -109,13 +139,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if request_id:
             con = db()
             request = con.execute("""
-                SELECT owner_id, status
+                SELECT owner_id, status, chat_id
                 FROM ticket_requests
                 WHERE id=?
             """, (request_id,)).fetchone()
 
             if request and request[1] == "pending":
                 owner_id = request[0]
+                request_chat_id = request[2]
                 friend_id = update.effective_user.id
 
                 if owner_id == friend_id:
@@ -183,10 +214,19 @@ async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     con = db()
-    row = con.execute(
-        "SELECT tickets FROM users WHERE user_id=?",
-        (user_id,)
-    ).fetchone()
+
+    if update.effective_chat.type in ("group", "supergroup"):
+        chat_id = update.effective_chat.id
+        row = con.execute(
+            "SELECT tickets FROM group_users WHERE chat_id=? AND user_id=?",
+            (chat_id, user_id)
+        ).fetchone()
+    else:
+        chat_id = None
+        row = con.execute(
+            "SELECT tickets FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
 
     if not row or row[0] <= 0:
         con.close()
@@ -223,10 +263,16 @@ async def gacha(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fruit_name = random.choices(names, weights=chances, k=1)[0]
     chance = next(row[1] for row in fruits if row[0] == fruit_name)
 
-    con.execute(
-        "UPDATE users SET tickets=tickets-1, last_gacha=? WHERE user_id=?",
-        (int(__import__("time").time()), user_id)
-    )
+    if chat_id is not None:
+        con.execute(
+            "UPDATE group_users SET tickets=tickets-1, last_gacha=? WHERE chat_id=? AND user_id=?",
+            (int(__import__("time").time()), chat_id, user_id)
+        )
+    else:
+        con.execute(
+            "UPDATE users SET tickets=tickets-1, last_gacha=? WHERE user_id=?",
+            (int(__import__("time").time()), user_id)
+        )
 
     con.execute("""
         INSERT INTO user_fruits (user_id, fruit_name, amount)
@@ -376,6 +422,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Siz admin emassiz.")
             return
 
+        context.user_data["admin_ticket_chat_id"] = query.message.chat_id
+
         con = db()
         row = con.execute(
             "SELECT value FROM settings WHERE key='ticket_amount'"
@@ -430,14 +478,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         amount = int(row[0]) if row else 1
 
-        con.execute("""
-            UPDATE users
-            SET tickets = COALESCE(tickets, 0) + ?
-        """, (amount,))
+        ticket_chat_id = context.user_data.get("admin_ticket_chat_id")
 
-        count = con.execute(
-            "SELECT COUNT(*) FROM users"
-        ).fetchone()[0]
+        if ticket_chat_id is not None and ticket_chat_id < 0:
+            con.execute("""
+                UPDATE group_users
+                SET tickets = COALESCE(tickets, 0) + ?
+                WHERE chat_id=?
+            """, (amount, ticket_chat_id))
+
+            count = con.execute(
+                "SELECT COUNT(*) FROM group_users WHERE chat_id=?",
+                (ticket_chat_id,)
+            ).fetchone()[0]
+        else:
+            con.execute("""
+                UPDATE users
+                SET tickets = COALESCE(tickets, 0) + ?
+            """, (amount,))
+
+            count = con.execute(
+                "SELECT COUNT(*) FROM users"
+            ).fetchone()[0]
 
         con.commit()
         con.close()
@@ -452,11 +514,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Siz admin emassiz.")
             return
 
-        con = db()
-        cur = con.execute("""
-            UPDATE users
-            SET tickets=0
-        """)
+        ticket_chat_id = context.user_data.get("admin_ticket_chat_id")
+
+        if ticket_chat_id is not None and ticket_chat_id < 0:
+            cur = con.execute("""
+                UPDATE group_users
+                SET tickets=0
+                WHERE chat_id=?
+            """, (ticket_chat_id,))
+        else:
+            cur = con.execute("""
+                UPDATE users
+                SET tickets=0
+            """)
         count = cur.rowcount
         con.commit()
         con.close()
@@ -703,10 +773,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         con = db()
         cur = con.cursor()
 
+        request_chat_id = query.message.chat_id if query.message else None
+
         cur.execute("""
-            INSERT INTO ticket_requests (owner_id, status, created_at)
-            VALUES (?, 'pending', ?)
-        """, (owner_id, int(time.time())))
+            INSERT INTO ticket_requests (owner_id, status, created_at, chat_id)
+            VALUES (?, 'pending', ?, ?)
+        """, (owner_id, int(time.time()), request_chat_id))
 
         request_id = cur.lastrowid
         con.commit()
@@ -793,7 +865,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         con = db()
         request = con.execute("""
-            SELECT owner_id, friend_id, status
+            SELECT owner_id, friend_id, status, chat_id
             FROM ticket_requests
             WHERE id=?
         """, (request_id,)).fetchone()
@@ -803,7 +875,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Ticket so‘rovi topilmadi.")
             return
 
-        owner_id, saved_friend_id, status = request
+        owner_id, saved_friend_id, status, request_chat_id = request
 
         if status != "pending":
             con.close()
@@ -859,7 +931,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         con = db()
 
         request = con.execute("""
-            SELECT owner_id, friend_id, status
+            SELECT owner_id, friend_id, status, chat_id
             FROM ticket_requests
             WHERE id=?
         """, (request_id,)).fetchone()
@@ -872,12 +944,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         owner_id = request[0]
+        request_chat_id = request[3]
 
-        con.execute("""
-            UPDATE users
-            SET tickets = COALESCE(tickets, 0) + 1
-            WHERE user_id=?
-        """, (owner_id,))
+        if request_chat_id is not None and request_chat_id < 0:
+            con.execute("""
+                INSERT INTO group_users (chat_id, user_id, tickets)
+                VALUES (?, ?, 1)
+                ON CONFLICT(chat_id, user_id)
+                DO UPDATE SET tickets = COALESCE(tickets, 0) + 1
+            """, (request_chat_id, owner_id))
+        else:
+            con.execute("""
+                UPDATE users
+                SET tickets = COALESCE(tickets, 0) + 1
+                WHERE user_id=?
+            """, (owner_id,))
 
         con.execute("""
             UPDATE ticket_requests
@@ -1110,10 +1191,19 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
 
-        con.execute(
-            "UPDATE users SET tickets=0 WHERE user_id=?",
-            (user[0],)
-        )
+        ticket_chat_id = context.user_data.get("admin_ticket_chat_id")
+
+        if ticket_chat_id is not None and ticket_chat_id < 0:
+            con.execute(
+                "UPDATE group_users SET tickets=0 WHERE chat_id=? AND user_id=?",
+                (ticket_chat_id, user[0])
+            )
+        else:
+            con.execute(
+                "UPDATE users SET tickets=0 WHERE user_id=?",
+                (user[0],)
+            )
+
         con.commit()
         con.close()
 
@@ -1155,11 +1245,21 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         ).fetchone()
         amount = int(row[0]) if row else 1
 
-        con.execute("""
-            UPDATE users
-            SET tickets = COALESCE(tickets, 0) + ?
-            WHERE user_id=?
-        """, (amount, user[0]))
+        ticket_chat_id = context.user_data.get("admin_ticket_chat_id")
+
+        if ticket_chat_id is not None and ticket_chat_id < 0:
+            con.execute("""
+                INSERT INTO group_users (chat_id, user_id, tickets)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id, user_id)
+                DO UPDATE SET tickets = COALESCE(group_users.tickets, 0) + excluded.tickets
+            """, (ticket_chat_id, user[0], amount))
+        else:
+            con.execute("""
+                UPDATE users
+                SET tickets = COALESCE(tickets, 0) + ?
+                WHERE user_id=?
+            """, (amount, user[0]))
 
         con.commit()
         con.close()
@@ -1243,6 +1343,7 @@ def main():
     app.add_handler(CommandHandler("store", store))
     app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler))
+    app.add_handler(MessageHandler(filters.ALL, register_group_user), group=1)
 
     from telegram.ext import CallbackQueryHandler
     app.add_handler(CallbackQueryHandler(button_handler))
