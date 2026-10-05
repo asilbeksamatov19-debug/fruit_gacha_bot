@@ -322,7 +322,7 @@ async def gacha(update, context):
         tickets = tickets[0] if tickets else 0
     if tickets <= 0:
         con.close()
-        await update.message.reply_text("❌ Sizda ticket yo‘q!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎫 Ticket olish", callback_data="ticket:get")]]))
+        await update.message.reply_text("❌ Sizda ticket yo‘q!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎫 Ticket olish", callback_data="ticket:get")]]), do_quote=False)
         return
     fruits = con.execute("SELECT name,chance FROM fruits WHERE enabled=1 AND chance>0").fetchall()
     if not fruits:
