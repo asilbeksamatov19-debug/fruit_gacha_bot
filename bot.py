@@ -459,7 +459,7 @@ async def panel_callback(update, context):
         await q.message.reply_text(group_panel_text(group_id),reply_markup=main_menu(group_id)); return
     if action=="ticket":
         con=db(); row=con.execute("SELECT ticket_amount FROM bot_groups WHERE chat_id=?",(group_id,)).fetchone(); amount=row[0]; con.close()
-        kb=[[InlineKeyboardButton(f"🎫 Ticket soni: {amount}",callback_data=f"set_ticket:{group_id}")],[InlineKeyboardButton("👥 Hammaga ticket",callback_data=f"give_all:{group_id}")],[InlineKeyboardButton("♻️ Hammaga ticket=0",callback_data=f"reset_tickets:{group_id}")],[InlineKeyboardButton("🔙 Panel",callback_data=f"back:{group_id}")]]
+        kb=[[InlineKeyboardButton(f"🎫 Ticket soni: {amount}",callback_data=f"set_ticket:{group_id}")],[InlineKeyboardButton("👤 Bitta userga ticket",callback_data=f"give_one:{group_id}")],[InlineKeyboardButton("👥 Hammaga ticket",callback_data=f"give_all:{group_id}")],[InlineKeyboardButton("♻️ Hammaga ticket=0",callback_data=f"reset_tickets:{group_id}")],[InlineKeyboardButton("🔙 Panel",callback_data=f"back:{group_id}")]]
         context.user_data["target_group_id"]=group_id
         await q.message.reply_text("🎫 TICKET SOZLAMALARI",reply_markup=InlineKeyboardMarkup(kb)); return
     if action=="chats":
@@ -535,7 +535,7 @@ async def ticket_verify(update,context,request_id):
 
 async def action_callback(update,context):
     q=update.callback_query; data=q.data
-    if not any(data.startswith(x) for x in ("set_ticket:","give_all:","reset_tickets:","back:","clear_store:","add_chat:","toggle_chat:","remove_chat:")): return
+    if not any(data.startswith(x) for x in ("set_ticket:","give_one:","give_all:","reset_tickets:","back:","clear_store:","add_chat:","toggle_chat:","remove_chat:")): return
     await q.answer()
     gid=int(data.split(":",1)[1]); context.user_data["target_group_id"]=gid
     if not is_owner(q.from_user.id):
@@ -548,6 +548,9 @@ async def action_callback(update,context):
     if data.startswith("set_ticket:"):
         context.user_data["admin_action"]="set_ticket"
         await q.message.reply_text("🔢 Har ticket so‘rovida nechta ticket berilsin?\nMasalan: 2")
+    elif data.startswith("give_one:"):
+        context.user_data["admin_action"]="give_one_user"
+        await q.message.reply_text("👤 Ticket beriladigan userning @username yoki Telegram ID sini yuboring.")
     elif data.startswith("give_all:"):
         con=db(); amount=con.execute("SELECT ticket_amount FROM bot_groups WHERE chat_id=?",(gid,)).fetchone()[0]; cur=con.execute("UPDATE group_users SET tickets=tickets+? WHERE chat_id=?",(amount,gid)); con.commit(); con.close(); await q.message.reply_text(f"✅ {cur.rowcount} ta userga {amount} tadan ticket berildi.")
     elif data.startswith("reset_tickets:"):
@@ -571,11 +574,37 @@ async def text_action(update,context):
         if not await is_group_admin(update,context): return
     text=(update.message.text or "").strip()
     con=db()
+    keep_action=False
     try:
         if action=="set_ticket":
             amount=int(text)
             if amount<1: raise ValueError
             con.execute("UPDATE bot_groups SET ticket_amount=? WHERE chat_id=?",(amount,gid)); con.commit(); await update.message.reply_text(f"✅ Ticket soni: {amount} ta")
+        elif action=="give_one_user":
+            lookup=text.lstrip("@").strip()
+            if not lookup:
+                raise ValueError
+            if lookup.isdigit():
+                row=con.execute("SELECT user_id,username,name FROM users WHERE user_id=?",(int(lookup),)).fetchone()
+            else:
+                row=con.execute("SELECT user_id,username,name FROM users WHERE lower(username)=lower(?)",(lookup,)).fetchone()
+            if not row:
+                raise LookupError
+            context.user_data["ticket_target_user_id"]=row[0]
+            context.user_data["admin_action"]="give_one_amount"
+            keep_action=True
+            await update.message.reply_text(f"👤 User topildi: {row[2] or row[1] or row[0]}\n🔢 Nechta ticket berilsin?")
+        elif action=="give_one_amount":
+            amount=int(text)
+            if amount<1:
+                raise ValueError
+            target_id=context.user_data.get("ticket_target_user_id")
+            if not target_id:
+                raise LookupError
+            con.execute("INSERT INTO group_users(chat_id,user_id,tickets) VALUES(?,?,?) ON CONFLICT(chat_id,user_id) DO UPDATE SET tickets=tickets+excluded.tickets",(gid,target_id,amount))
+            con.commit()
+            await update.message.reply_text(f"✅ Userga {amount} ta ticket berildi.")
+            context.user_data.pop("ticket_target_user_id",None)
         elif action=="add_chat":
             cid=int(text); chat=await context.bot.get_chat(cid)
             if chat.type not in ("channel","group","supergroup"): raise ValueError
@@ -595,7 +624,9 @@ async def text_action(update,context):
     except Exception:
         await update.message.reply_text("❌ Amal bajarilmadi. Botning chatdagi admin huquqlarini tekshiring.")
     finally:
-        con.close(); context.user_data.pop("admin_action",None)
+        con.close()
+        if not keep_action:
+            context.user_data.pop("admin_action",None)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -631,7 +662,7 @@ def main():
     app.add_handler(CommandHandler("ticket",ticket_command))
     app.add_handler(CommandHandler("admin",admin))
     app.add_handler(CommandHandler("addchat",addchat))
-    app.add_handler(CallbackQueryHandler(action_callback,pattern=r"^(set_ticket|give_all|reset_tickets|back|clear_store|add_chat|toggle_chat|remove_chat):"))
+    app.add_handler(CallbackQueryHandler(action_callback,pattern=r"^(set_ticket|give_one|give_all|reset_tickets|back|clear_store|add_chat|toggle_chat|remove_chat):"))
     app.add_handler(CallbackQueryHandler(panel_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_action))
     app.add_handler(MessageHandler(filters.ALL,register_group),group=1)
