@@ -1,3 +1,4 @@
+import logging
 import os
 import sqlite3
 import random
@@ -40,6 +41,9 @@ FRUITS = [
     ("Yeti", 0.0303643725), ("Sound", 0.455465587), ("Lightning", 0.2530364372),
     ("Love", 0.6072874494), ("Spring", 9.6153846154),
 ]
+
+async def error_handler(update, context):
+    logging.exception("Telegram botda kutilmagan xato:", exc_info=context.error)
 
 
 def db():
@@ -620,6 +624,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN .env ichida topilmadi")
     init_db(); start_health_server()
     app=Application.builder().token(BOT_TOKEN).build()
+    app.add_error_handler(error_handler)
     app.add_handler(CommandHandler("start",start))
     app.add_handler(CommandHandler("gacha",gacha))
     app.add_handler(CommandHandler("store",store))
