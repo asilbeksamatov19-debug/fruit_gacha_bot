@@ -550,7 +550,7 @@ async def action_callback(update,context):
         await q.message.reply_text("🔢 Har ticket so‘rovida nechta ticket berilsin?\nMasalan: 2")
     elif data.startswith("give_one:"):
         context.user_data["admin_action"]="give_one_user"
-        await q.message.reply_text("👤 Ticket beriladigan userning @username yoki Telegram ID sini yuboring.")
+        await q.message.reply_text("👤 Ticket beriladigan userning xabariga Reply qilib yuboring.\n\nYoki @username / Telegram ID yuborishingiz mumkin.")
     elif data.startswith("give_all:"):
         con=db(); amount=con.execute("SELECT ticket_amount FROM bot_groups WHERE chat_id=?",(gid,)).fetchone()[0]; cur=con.execute("UPDATE group_users SET tickets=tickets+? WHERE chat_id=?",(amount,gid)); con.commit(); con.close(); await q.message.reply_text(f"✅ {cur.rowcount} ta userga {amount} tadan ticket berildi.")
     elif data.startswith("reset_tickets:"):
@@ -573,6 +573,14 @@ async def text_action(update,context):
     if not is_owner(update.effective_user.id):
         if not await is_group_admin(update,context): return
     text=(update.message.text or "").strip()
+    if action=="give_one_user" and update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target=update.message.reply_to_message.from_user
+        save_user(target)
+        context.user_data["ticket_target_user_id"]=target.id
+        context.user_data["admin_action"]="give_one_amount"
+        keep_action=True
+        await update.message.reply_text(f"👤 User topildi: {target.full_name or target.username or target.id}\n🔢 Nechta ticket berilsin?")
+        return
     con=db()
     keep_action=False
     try:
